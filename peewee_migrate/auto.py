@@ -6,7 +6,6 @@ from collections import OrderedDict
 import datetime
 
 import peewee as pw
-from collections import Hashable, OrderedDict
 from playhouse.reflection import Column as VanilaColumn
 
 
