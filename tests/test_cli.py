@@ -17,6 +17,12 @@ def test_cli(tmpdir):
     assert result.exit_code == 0
 
     result = runner.invoke(cli, [
+        'migrate', '--directory=%s' % tmpdir, '--database=sqlite:///:memory:', '-v', '--fake'])
+    assert result.exit_code == 0
+    assert 'Migrations completed: 001_test' in result.output
+    assert 'add_column' not in result.output
+
+    result = runner.invoke(cli, [
         'migrate', '--directory=%s' % tmpdir, '--database=sqlite:///:memory:'])
     assert result.exit_code == 0
     assert 'Migrations completed: 001_test' in result.output
@@ -24,3 +30,7 @@ def test_cli(tmpdir):
     result = runner.invoke(cli, [
         'rollback', '--directory=%s' % tmpdir, '--database=sqlite:///:memory:', '001_test'])
     assert result.exit_code == -1
+
+    result = runner.invoke(cli, [
+        'list', '--directory=%s' % tmpdir, '--database=sqlite:///:memory:'])
+    assert 'Migrations are undone:\n001_test' in result.output

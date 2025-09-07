@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 from importlib import import_module
 from types import ModuleType
 
@@ -14,7 +15,8 @@ from peewee_migrate.migrator import Migrator
 
 
 CLEAN_RE = re.compile(r'\s+$', re.M)
-MIGRATE_DIR = os.path.join(os.getcwd(), 'migrations')
+CURDIR = os.getcwd()
+DEFAULT_MIGRATE_DIR = os.path.join(CURDIR, 'migrations')
 VOID = lambda m, d: None # noqa
 with open(os.path.join(os.path.abspath(os.path.dirname(__file__)), 'template.txt')) as t:
     MIGRATE_TEMPLATE = t.read()
@@ -24,17 +26,22 @@ class BaseRouter(object):
 
     """Abstract base class for router."""
 
-    def __init__(self, database, logger=LOGGER):
+    def __init__(self, database, migrate_table='migratehistory', ignore=None,
+                 schema=None, logger=LOGGER):
         self.database = database
+        self.migrate_table = migrate_table
+        self.schema = schema
+        self.ignore = ignore
         self.logger = logger
         if not isinstance(self.database, (pw.Database, pw.Proxy)):
             raise RuntimeError('Invalid database: %s' % database)
 
     @cached_property
     def model(self):
-        """Ensure that migrations has prepared to run."""
-        # Initialize MigrationHistory model
+        """Initialize and cache MigrationHistory model."""
         MigrateHistory._meta.database = self.database
+        MigrateHistory._meta.db_table = self.migrate_table
+        MigrateHistory._meta.schema = self.schema
         MigrateHistory.create_table(True)
         return MigrateHistory
 
@@ -42,53 +49,10 @@ class BaseRouter(object):
     def todo(self):
         raise NotImplementedError
 
-    def create(self, name='auto', auto=False):
-        """Create a migration."""
-        migrate = rollback = ''
-        if auto:
-            if isinstance(auto, str):
-                try:
-                    auto = import_module(auto)
-                except ImportError:
-                    return self.logger.error("Can't import models module: %s", auto)
-
-            if isinstance(auto, ModuleType):
-                auto = list(filter(
-                    lambda m: isinstance(m, type) and issubclass(m, pw.Model),
-                    (getattr(auto, model) for model in dir(auto))))  # noqa
-
-            for migration in self.diff:
-                self.run_one(migration, self.migrator)
-
-            models1 = auto
-            models2 = list(self.migrator.orm.values())
-
-            migrate = diff_many(models1, models2)
-            if not migrate:
-                return self.logger.warn('No changes found.')
-
-            migrate = NEWLINE + NEWLINE.join('\n\n'.join(migrate).split('\n'))
-            migrate = CLEAN_RE.sub('\n', migrate)
-
-            rollback = diff_many(models2, models1, reverse=True)
-            rollback = NEWLINE + NEWLINE.join('\n\n'.join(rollback).split('\n'))
-            rollback = CLEAN_RE.sub('\n', rollback)
-
-        self.logger.info('Creating migration "%s"', name)
-        path = self._create(name, migrate, rollback)
-        self.logger.info('Migration created %s', path)
-        return path
-
-    def _create(self, name, migrate='', rollback=''):
-        raise NotImplementedError
-
-    def read(self, name):
-        raise NotImplementedError
-
     @property
     def done(self):
         """Scan migrations in database."""
-        return [mm.name for mm in self.model.select()]
+        return [mm.name for mm in self.model.select().order_by(self.model.id)]
 
     @property
     def diff(self):
@@ -104,9 +68,61 @@ class BaseRouter(object):
             self.run_one(name, migrator)
         return migrator
 
-    def run_one(self, name, migrator, fake=True, downgrade=False, force=False):
-        """Run a migration."""
+    def create(self, name='auto', auto=False):
+        """Create a migration."""
+        migrate = rollback = ''
+        if auto:
+            try:
+                models = load_models(auto)
+            except ImportError:
+                return self.logger.error("Can't import models module: %s", auto)
 
+            if self.ignore:
+                models = [m for m in models if m._meta.name not in self.ignore]
+
+            for migration in self.diff:
+                self.run_one(migration, self.migrator, fake=True)
+
+            migrate = compile_migrations(self.migrator, models)
+            if not migrate:
+                return self.logger.warn('No changes found.')
+
+            rollback = compile_migrations(self.migrator, models, reverse=True)
+
+        self.logger.info('Creating migration "%s"', name)
+        name = self.compile(name, migrate, rollback)
+        self.logger.info('Migration has been created as "%s"', name)
+        return name
+
+    def merge(self, name='initial'):
+        """Merge migrations into one."""
+        migrator = Migrator(self.database)
+        migrate = compile_migrations(migrator, self.migrator.orm.values())
+        if not migrate:
+            return self.logger.error("Can't merge migrations")
+
+        self.clear()
+
+        self.logger.info('Merge migrations into "%s"', name)
+        rollback = compile_migrations(self.migrator, [])
+        name = self.compile(name, migrate, rollback, 0)
+
+        migrator = Migrator(self.database)
+        self.run_one(name, migrator, fake=True, force=True)
+        self.logger.info('Migrations has been merged into "%s"', name)
+
+    def clear(self):
+        """Clear migrations."""
+        self.model.delete().execute()
+
+    def compile(self, name, migrate='', rollback='', num=None):
+        raise NotImplementedError
+
+    def read(self, name):
+        raise NotImplementedError
+
+    def run_one(self, name, migrator, fake=True, downgrade=False, force=False):
+        """Run/emulate a migration with given name."""
         try:
             migrate, rollback = self.read(name)
             if fake:
@@ -121,24 +137,25 @@ class BaseRouter(object):
                 migrator.clean()
                 return migrator
 
-            self.logger.info('Running "%s"', name)
             with self.database.transaction():
                 if not downgrade:
+                    self.logger.info('Migrate "%s"', name)
                     migrate(migrator, self.database, fake=fake)
                     migrator.run()
                     self.model.create(name=name)
-                    self.logger.info('Done %s', name)
                 else:
                     self.logger.info('Rolling back %s', name)
                     rollback(migrator, self.database, fake=fake)
                     migrator.run()
                     self.model.delete().where(self.model.name == name).execute()
-                    self.logger.info('Rolled back %s', name)
+
+                self.logger.info('Done %s', name)
 
         except Exception as exc:
             self.database.rollback()
             self.logger.exception(exc)
-            self.logger.error('Migration failed: %s', name)
+            operation = 'Migration' if not downgrade else 'Rollback'
+            self.logger.error('%s failed: %s', operation, name)
             raise
 
     def run(self, name=None, fake=False):
@@ -177,7 +194,7 @@ class Router(BaseRouter):
 
     filemask = re.compile(r"[\d]{3}_[^\.]+\.py$")
 
-    def __init__(self, database, migrate_dir=MIGRATE_DIR, **kwargs):
+    def __init__(self, database, migrate_dir=DEFAULT_MIGRATE_DIR, **kwargs):
         super(Router, self).__init__(database, **kwargs)
         self.migrate_dir = migrate_dir
 
@@ -187,19 +204,20 @@ class Router(BaseRouter):
         if not os.path.exists(self.migrate_dir):
             self.logger.warn('Migration directory: %s does not exist.', self.migrate_dir)
             os.makedirs(self.migrate_dir)
-        return sorted(
-            ''.join(f[:-3]) for f in os.listdir(self.migrate_dir) if self.filemask.match(f))
+        return sorted(f[:-3] for f in os.listdir(self.migrate_dir) if self.filemask.match(f))
 
-    def _create(self, name, migrate='', rollback=''):
+    def compile(self, name, migrate='', rollback='', num=None):
         """Create a migration."""
-        num = len(self.todo)
-        prefix = '{:03}_'.format(num + 1)
-        name = prefix + name + '.py'
-        path = os.path.join(self.migrate_dir, name)
-        with open(path, 'w') as f:
-            f.write(MIGRATE_TEMPLATE.format(migrate=migrate, rollback=rollback))
+        if num is None:
+            num = len(self.todo)
 
-        return path
+        name = '{:03}_'.format(num + 1) + name
+        filename = name + '.py'
+        path = os.path.join(self.migrate_dir, filename)
+        with open(path, 'w') as f:
+            f.write(MIGRATE_TEMPLATE.format(migrate=migrate, rollback=rollback, name=filename))
+
+        return name
 
     def read(self, name):
         """Read migration from file."""
@@ -208,6 +226,13 @@ class Router(BaseRouter):
             scope = {}
             exec_in(code, scope)
             return scope.get('migrate', VOID), scope.get('rollback', VOID)
+
+    def clear(self):
+        """Remove migrations from fs."""
+        super(Router, self).clear()
+        for name in self.todo:
+            filename = os.path.join(self.migrate_dir, name + '.py')
+            os.remove(filename)
 
 
 class ModuleRouter(BaseRouter):
@@ -223,3 +248,33 @@ class ModuleRouter(BaseRouter):
     def read(self, name):
         mod = getattr(self.migrate_module, name)
         return getattr(mod, 'migrate', VOID), getattr(mod, 'rollback', VOID)
+
+
+def load_models(module):
+    """Load models from given module."""
+    if isinstance(module, string_types):
+        if CURDIR not in sys.path:
+            sys.path.insert(0, CURDIR)
+        module = import_module(module)
+
+    if isinstance(module, ModuleType):
+        return list(filter(
+            lambda m: isinstance(m, type) and issubclass(m, pw.Model) and
+            hasattr(m, '_meta'),
+            (getattr(module, model) for model in dir(module))))
+
+    return module
+
+
+def compile_migrations(migrator, models, reverse=False):
+    """Compile migrations for given models."""
+    source = migrator.orm.values()
+    if reverse:
+        source, models = models, source
+
+    migrations = diff_many(models, source, migrator, reverse=reverse)
+    if not migrations:
+        return False
+
+    migrations = NEWLINE + NEWLINE.join('\n\n'.join(migrations).split('\n'))
+    return CLEAN_RE.sub('\n', migrations)

@@ -1,6 +1,7 @@
 """ Tests for `peewee_migrate` module. """
 import peewee as pw
 import os
+import mock
 
 
 def test_router():
@@ -28,6 +29,11 @@ def test_router():
     router.run()
     assert router.diff == []
 
+    with mock.patch('peewee.Database.execute_sql') as execute_sql:
+        router.run_one('002_test', router.migrator, fake=True)
+
+    assert not execute_sql.called
+
     migrations = MigrateHistory.select()
     assert list(migrations)
     assert migrations.count() == 3
@@ -36,5 +42,12 @@ def test_router():
     assert router.diff == ['003_tespy']
     assert migrations.count() == 2
 
+    with mock.patch('os.remove') as mocked:
+        router.merge()
+        assert mocked.call_count == 3
+        assert mocked.call_args[0][0] == 'tests/migrations/003_tespy.py'
+        assert MigrateHistory.select().count() == 1
+
+    os.remove('tests/migrations/001_initial.py')
 
 # pylama:ignore=W0621

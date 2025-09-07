@@ -2,10 +2,8 @@
 import os
 import re
 import sys
-from importlib import import_module
 
 import click
-import peewee as pw
 from playhouse.db_url import connect
 
 from peewee_migrate.compat import string_types
@@ -22,10 +20,15 @@ def get_router(directory, database, verbose=0):
 
     logging_level = VERBOSE[verbose]
     config = {}
+    migrate_table = 'migratehistory'
+    ignore = schema = None
     try:
         with open(os.path.join(directory, 'conf.py')) as cfg:
             exec_in(cfg.read(), config, config)
             database = config.get('DATABASE', database)
+            ignore = config.get('IGNORE', ignore)
+            schema = config.get('SCHEMA', schema)
+            migrate_table = config.get('MIGRATE_TABLE', migrate_table)
             logging_level = config.get('LOGGING_LEVEL', logging_level).upper()
     except IOError:
         pass
@@ -36,7 +39,8 @@ def get_router(directory, database, verbose=0):
     LOGGER.setLevel(logging_level)
 
     try:
-        return Router(database, migrate_dir=directory)
+        return Router(database, migrate_table=migrate_table, migrate_dir=directory,
+                      ignore=ignore, schema=schema)
     except RuntimeError as exc:
         LOGGER.error(exc)
         return sys.exit(1)
@@ -51,10 +55,10 @@ def cli():
 @click.option('--name', default=None, help="Select migration")
 @click.option('--database', default=None, help="Database connection")
 @click.option('--directory', default='migrations', help="Directory where migrations are stored")
-@click.option('--fake', default=False, help=("Run migration as fake."))
+@click.option('--fake', is_flag=True, default=False, help=("Run migration as fake."))
 @click.option('-v', '--verbose', count=True)
 def migrate(name=None, database=None, directory=None, verbose=None, fake=False):
-    """ Run migrations. """
+    """Migrate database."""
     router = get_router(directory, database, verbose)
     migrations = router.run(name, fake=fake)
     if migrations:
@@ -69,7 +73,7 @@ def migrate(name=None, database=None, directory=None, verbose=None, fake=False):
 @click.option('--directory', default='migrations', help="Directory where migrations are stored")
 @click.option('-v', '--verbose', count=True)
 def create(name, database=None, auto=False, directory=None, verbose=None):
-    """ Create migration. """
+    """Create a migration."""
     router = get_router(directory, database, verbose)
     router.create(name, auto=auto)
 
@@ -80,5 +84,30 @@ def create(name, database=None, auto=False, directory=None, verbose=None):
 @click.option('--directory', default='migrations', help="Directory where migrations are stored")
 @click.option('-v', '--verbose', count=True)
 def rollback(name, database=None, directory=None, verbose=None):
+    """Rollback a migration with given name."""
     router = get_router(directory, database, verbose)
     router.rollback(name)
+
+
+@cli.command()
+@click.option('--database', default=None, help="Database connection")
+@click.option('--directory', default='migrations', help="Directory where migrations are stored")
+@click.option('-v', '--verbose', count=True)
+def list(database=None, directory=None, verbose=None):
+    """List migrations."""
+    router = get_router(directory, database, verbose)
+    click.echo('Migrations are done:')
+    click.echo('\n'.join(router.done))
+    click.echo('')
+    click.echo('Migrations are undone:')
+    click.echo('\n'.join(router.diff))
+
+
+@cli.command()
+@click.option('--database', default=None, help="Database connection")
+@click.option('--directory', default='migrations', help="Directory where migrations are stored")
+@click.option('-v', '--verbose', count=True)
+def merge(database=None, directory=None, verbose=None):
+    """Merge migrations into one."""
+    router = get_router(directory, database, verbose)
+    router.merge()

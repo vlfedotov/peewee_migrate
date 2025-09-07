@@ -33,6 +33,7 @@ Requirements
 =============
 
 - python 2.7,3.3,3.4
+- peewee >= 2.10.1
 
 .. _installation:
 
@@ -65,6 +66,7 @@ Getting help: ::
     Commands:
         create   Create migration.
         migrate  Run migrations.
+        rollback Rollback migration.
 
 Create migration: ::
 
@@ -75,6 +77,7 @@ Create migration: ::
         Create migration.
 
     Options:
+        --auto TEXT       Create migrations automatically. Set path to your models module.
         --database TEXT   Database connection
         --directory TEXT  Directory where migrations are stored
         -v, --verbose
@@ -148,7 +151,8 @@ Development of starter happens at github: https://github.com/klen/peewee_migrate
 Contributors
 =============
 
-* klen_ (Kirill Klenov)
+See `AUTHORS.rst`
+
 
 .. _license:
 
