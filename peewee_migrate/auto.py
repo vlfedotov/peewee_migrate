@@ -1,4 +1,8 @@
-from collections import Hashable, OrderedDict
+try:
+    from collections.abc import Hashable
+except ImportError:
+    from collections import Hashable
+from collections import OrderedDict
 
 import peewee as pw
 from playhouse.reflection import Column as VanilaColumn

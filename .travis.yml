@@ -5,6 +5,13 @@ python: 2.7
 env:
 - TOXENV=py27
 - TOXENV=py34
+- TOXENV=py36
+- TOXENV=py37
+- TOXENV=py38
+- TOXENV=py39
+- TOXENV=py310
+- TOXENV=py311
+- TOXENV=py312
 - TOXENV=cov
 
 branches:
